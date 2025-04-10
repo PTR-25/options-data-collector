@@ -21,12 +21,28 @@ This Python script is designed to collect real-time options order book data from
 ## Requirements
 
 * **Python Version:** 3.7 or higher (due to the use of `dataclasses` and `asyncio`).
-* **Dependencies:**
+* **Core Dependencies:**
     ```
-    aiohttp>=3.8
-    pandas>=2.0
-    python-dotenv>=1.0
-    numpy>=1.26
+    aiohttp>=3.8.0
+    pandas>=2.0.0
+    python-dateutil>=2.8.2
+    python-dotenv>=1.0.0
+    pyarrow>=14.0.1
+    numpy>=1.24.0
+    boto3>=1.28.0
+    botocore>=1.31.0
+    ```
+* **Performance Optimizations:**
+    ```
+    aiodns>=3.0.0      # For better DNS resolution performance
+    cchardet>=2.1.7    # For better character encoding detection
+    ujson>=5.7.0       # For faster JSON processing
+    ```
+* **Additional Features:**
+    ```
+    aiofiles>=23.1.0   # For async file operations
+    cryptography>=41.0.0  # For secure connections
+    tenacity>=8.2.0    # For enhanced retry mechanisms
     ```
 
 ## Installation Instructions
@@ -49,7 +65,6 @@ This Python script is designed to collect real-time options order book data from
     pip install -r requirements.txt
     ```
 
-
 4.  **Create a `.env` file** in the same directory as the script and configure the following environment variables:
     ```
     CLIENT_ID_1=<your_deribit_client_id>
@@ -61,41 +76,54 @@ This Python script is designed to collect real-time options order book data from
 
 ## Usage
 
-1.  **Ensure the `.env` file is correctly configured** with your Deribit API credentials.
+The script can be run either locally or on an AWS EC2 instance.
 
-2.  **Run the Python script:**
-    ```bash
-    python store_options.py
-    ```
+### Local Usage
 
-3.  **Expected Output:**
-    * The script will start fetching options order book data from Deribit.
-    * You will see logging messages in the console indicating the progress, including API calls, data processing, and writing to files.
-    * The collected data will be saved in CSV files under the directory specified by `BASE_SAVE_PATH` (default: `data`). The directory structure will be organized as follows:
-        ```
-        data/
-        ├── <underlying_asset>/
-        │   ├── <expiry_type>/
-        │   │   └── <underlying_asset>-<DD><Mon><YY>/
-        │   │       └── <instrument_name>.csv
-        ```
-        For example:
-        ```
-        data/
-        ├── BTC/
-        │   ├── Weekly/
-        │   │   └── BTC-28MAR25/
-        │   │       └── BTC-28MAR25-80000-C.csv
-        │   │       └── BTC-28MAR25-30000-P.csv
-        │   ├── Monthly/
-        │   │   └── BTC-25APR25/
-        │   │       └── BTC-25APR25-90000-C.csv
-        ├── ETH/
-        │   └── ...
-        └── XRP_USDC/
-            └── ...
-        ```
-    * Each CSV file will contain the order book data for a specific instrument, appended with new data every 5 minutes.
+For local data collection without S3 synchronization:
+
+1. **Configure environment:**
+   ```bash
+   # In .env file
+   BASE_SAVE_PATH="./data"  # Local directory for data storage
+   BASE_URL="https://www.deribit.com/api/v2"
+   CLIENT_ID_1="your_deribit_client_id"
+   CLIENT_SECRET_1="your_deribit_client_secret"
+   ```
+
+2. **Run the local version:**
+   ```bash
+   python local_runner.py
+   ```
+
+### EC2 Deployment
+
+For production deployment with S3 synchronization:
+
+1. **Set up AWS credentials:**
+   - Configure AWS credentials for S3 access
+   - Create an S3 bucket for data storage
+
+2. **Configure environment:**
+   ```bash
+   # In .env file
+   BASE_SAVE_PATH="/home/ec2-user/data"
+   BASE_URL="https://www.deribit.com/api/v2"
+   CLIENT_ID_1="your_deribit_client_id"
+   CLIENT_SECRET_1="your_deribit_client_secret"
+   S3_BUCKET="your-s3-bucket-name"
+   ```
+
+3. **Run the EC2 version:**
+   ```bash
+   python ec2_runner.py
+   ```
+
+   The EC2 version includes:
+   - Automatic data rotation every day
+   - S3 synchronization of collected data
+   - Cleanup of old local data folders
+   - Connection management with automatic recovery
 
 ## Code Structure
 
