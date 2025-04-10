@@ -787,6 +787,35 @@ class OptionsDataStore:
         finally:
             await self.close()  
 
+    async def close(self):
+        """Cleanup resources when closing the store"""
+        try:
+            # Close API connections
+            if hasattr(self, 'api') and self.api:
+                await self.api.close()
+            
+            # Flush any remaining data
+            for instrument in list(self.data_buffer.buffer.keys()):
+                df = await self.data_buffer.flush(instrument)
+                if df is not None:
+                    try:
+                        parts = instrument.split("-")
+                        underlying = parts[0]
+                        expiry_str = parts[1]
+                        expiry_date = datetime.strptime(expiry_str, "%d%b%y").date()
+                        expiry_type = self.classify_option(expiry_date)
+                        storage_path = self.get_storage_path(underlying, expiry_type, expiry_date)
+                        storage_path.mkdir(parents=True, exist_ok=True)
+                        file_path = storage_path / f"{instrument}.csv"
+                        df.to_csv(file_path, mode='a', header=not file_path.exists(), index=False)
+                    except Exception as e:
+                        logger.error(f"Error writing final data for {instrument}: {e}")
+            
+            logger.info("Successfully closed OptionsDataStore")
+        except Exception as e:
+            logger.error(f"Error during OptionsDataStore cleanup: {e}")
+            raise
+
 async def main():
     store = OptionsDataStore()
     await store.run()
