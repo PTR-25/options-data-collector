@@ -45,10 +45,11 @@ def cleanup_old_folders(base_dir: str, max_age_hours: int = 48):
     base_path = Path(base_dir)
     current_time = datetime.now(timezone.utc)
     deleted_count = 0
+    skipped_count = 0
     
     # Get all folders that match the pattern 'data_YYYYMMDD_HHMMSS'
     for folder in base_path.parent.glob('data_*'):
-        if not folder.is_dir() or folder.name == 'data':
+        if not folder.is_dir() or folder.name == 'data' or folder.name.startswith('data_new_'):
             continue
             
         try:
@@ -59,14 +60,28 @@ def cleanup_old_folders(base_dir: str, max_age_hours: int = 48):
             
             # Delete if older than max_age_hours
             if (current_time - folder_time) > timedelta(hours=max_age_hours):
-                shutil.rmtree(folder)
-                deleted_count += 1
-                logger.info(f"Deleted old folder: {folder.name}")
+                # Check if folder is empty or has a sync marker
+                is_empty = True
+                has_data = False
+                for p in folder.glob('**/*'):
+                    if p.is_file() and not p.name.startswith('.'):
+                        has_data = True
+                        is_empty = False
+                        break
+                
+                if is_empty or not has_data:
+                    shutil.rmtree(folder)
+                    deleted_count += 1
+                    logger.info(f"Deleted old folder: {folder.name}")
+                else:
+                    skipped_count += 1
+                    logger.warning(f"Skipped non-empty folder: {folder.name} (might contain unsynced data)")
+            
         except (ValueError, OSError) as e:
             logger.error(f"Error processing folder {folder.name}: {e}")
             
-    if deleted_count > 0:
-        logger.info(f"Cleaned up {deleted_count} old data folders")
+    if deleted_count > 0 or skipped_count > 0:
+        logger.info(f"Folder cleanup: deleted {deleted_count}, skipped {skipped_count} folders")
 
 async def main():
     store = OptionsDataStore()
@@ -99,16 +114,19 @@ async def main():
             
             # Check if a new day is reached (at UTC midnight)
             now = datetime.now(timezone.utc)
+            # Using consistent second=0 for comparison
             current_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
             if last_synced_day is None or current_day > last_synced_day:
                 logger.info("New day reached: rotating data folder for S3 sync.")
                 rotated_folder = store.rotate_data_directory()
                 if rotated_folder:
                     logger.info("Initiating S3 sync and cleanup on rotated folder.")
-                    store.s3_sync_and_cleanup(folder=rotated_folder)
-                    # Add cleanup of old folders after successful S3 sync
-                    cleanup_old_folders(store.base_path)
-                    logger.info("S3 sync and cleanup complete.")
+                    sync_success = store.s3_sync_and_cleanup(folder=rotated_folder)
+                    if sync_success:
+                        logger.info("S3 sync completed successfully. Running folder cleanup.")
+                        cleanup_old_folders(store.base_path)
+                    else:
+                        logger.warning("S3 sync had issues. Skipping folder cleanup to prevent data loss.")
                 last_synced_day = current_day
 
         except Exception as e:

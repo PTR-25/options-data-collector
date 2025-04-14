@@ -376,12 +376,8 @@ class OptionsDataStore:
         }
         # Track when instruments were last reloaded
         self.last_instrument_reload_date: Optional[date] = None
-        
-    async def initialize(self):
-        """Initialize the data store and create necessary directories"""
-        await self.api.initialize()
-        self.base_path.mkdir(parents=True, exist_ok=True)
-        await self.load_instruments()
+        # Track S3 sync status
+        self.s3_sync_log = {}
         
     async def initialize(self):
         """Initialize the data store and create necessary directories."""
@@ -638,10 +634,23 @@ class OptionsDataStore:
             success_rate = total_success / total_instruments if total_instruments > 0 else 0
             logger.info(f"Final success rate for {currency}: {success_rate:.2%}")
             
-    async def write_buffered_data(self):
+    async def write_buffered_data(self, force_flush=False):
         """Write buffered data to CSV files (one CSV per instrument, appending rows)"""
-        for instrument in list(self.data_buffer.buffer.keys()):
-            df = await self.data_buffer.flush(instrument)
+        # Get all instruments from buffer 
+        instruments = list(self.data_buffer.buffer.keys())
+        
+        for instrument in instruments:
+            # If force_flush, flush the buffer even if it's not full
+            df = None
+            if force_flush:
+                async with self.data_buffer.lock:
+                    if self.data_buffer.buffer[instrument]:
+                        df = pd.DataFrame(self.data_buffer.buffer[instrument])
+                        self.data_buffer.buffer[instrument] = []
+            else:
+                # Normal flush (only if buffer reached CHUNK_SIZE)
+                df = await self.data_buffer.flush(instrument)
+                
             if df is not None:
                 try:
                     # Parse instrument details from instrument name (e.g., "XRP_USDC-25APR25-2d4-P")
@@ -691,18 +700,41 @@ class OptionsDataStore:
     
     def s3_sync_and_cleanup(self, folder: Path = None):
         """
-        Upload CSV files from the specified folder (or self.base_path by default)
-        to the S3 bucket and then delete the local folder.
+        Upload CSV files from the specified folder to S3 bucket and delete only after
+        successful uploads. Implements verification and tracking of uploads.
         """
         s3_bucket = os.getenv("S3_BUCKET")
         if not s3_bucket:
             logger.error("S3_BUCKET is not defined in the environment variables.")
-            return
+            return False
 
-        s3 = boto3.client("s3")
+        # Initialize transaction log for this sync operation
+        sync_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        self.s3_sync_log[sync_id] = {
+            "started": datetime.now(timezone.utc).isoformat(),
+            "folder": str(folder) if folder else str(self.base_path),
+            "total_files": 0,
+            "successful_uploads": 0,
+            "failed_uploads": 0,
+            "folders_to_delete": []
+        }
+        
+        # Initialize boto3 client with error handling
+        try:
+            s3 = boto3.client("s3")
+        except Exception as e:
+            logger.error(f"Failed to initialize S3 client: {e}")
+            return False
+
         target_path = folder or self.base_path
+        if not target_path.exists():
+            logger.error(f"Target path {target_path} does not exist")
+            return False
 
-        # Iterate through each currency folder
+        # Track folders and their files for deletion only after successful uploads
+        folder_files = {}  # { folder_path: {"total": n, "success": 0, "files": []} }
+
+        # First pass: upload all files and track success
         for currency_folder in target_path.iterdir():
             if not currency_folder.is_dir():
                 continue
@@ -714,22 +746,77 @@ class OptionsDataStore:
                 for expiry_folder in expiry_type_folder.iterdir():
                     if not expiry_folder.is_dir():
                         continue
-
+                    
+                    folder_path = str(expiry_folder)
+                    folder_files[folder_path] = {"total": 0, "success": 0, "files": []}
+                    
                     for csv_file in expiry_folder.glob("*.csv"):
+                        folder_files[folder_path]["total"] += 1
+                        folder_files[folder_path]["files"].append(csv_file)
+                        self.s3_sync_log[sync_id]["total_files"] += 1
+                        
                         s3_key = f"{currency_folder.name}/{expiry_type_folder.name}/{expiry_folder.name}/{csv_file.name}"
-                        try:
-                            s3.upload_file(str(csv_file), s3_bucket, s3_key)
-                            logger.info(f"Uploaded {csv_file} to s3://{s3_bucket}/{s3_key}")
-                        except Exception as e:
-                            logger.error(f"Failed to upload {csv_file}: {e}")
-                            continue
+                        retry_count = 0
+                        max_retries = 3
+                        
+                        # Implement retry logic for S3 uploads
+                        while retry_count < max_retries:
+                            try:
+                                s3.upload_file(str(csv_file), s3_bucket, s3_key)
+                                # Verify upload success with head_object
+                                s3.head_object(Bucket=s3_bucket, Key=s3_key)
+                                logger.info(f"Uploaded {csv_file} to s3://{s3_bucket}/{s3_key}")
+                                folder_files[folder_path]["success"] += 1
+                                self.s3_sync_log[sync_id]["successful_uploads"] += 1
+                                break
+                            except Exception as e:
+                                retry_count += 1
+                                if retry_count >= max_retries:
+                                    logger.error(f"Failed to upload {csv_file} after {max_retries} attempts: {e}")
+                                    self.s3_sync_log[sync_id]["failed_uploads"] += 1
+                                else:
+                                    logger.warning(f"Retrying upload for {csv_file} (attempt {retry_count+1})")
+                                    time.sleep(2 ** retry_count)  # Exponential backoff
 
-                    try:
-                        shutil.rmtree(expiry_folder)
-                        logger.info(f"Deleted local folder: {expiry_folder}")
-                    except Exception as e:
-                        logger.error(f"Failed to delete folder {expiry_folder}: {e}")
+        # Second pass: delete only folders with 100% successful uploads
+        folders_deleted = 0
+        for folder_path, stats in folder_files.items():
+            if stats["total"] > 0 and stats["success"] == stats["total"]:
+                try:
+                    expiry_folder = Path(folder_path)
+                    # Create a temporary marker file to avoid race conditions
+                    marker_file = expiry_folder / ".sync_complete"
+                    with open(marker_file, 'w') as f:
+                        f.write(f"Sync completed at {datetime.now(timezone.utc).isoformat()}")
+                    
+                    # Wait briefly to ensure file system sync
+                    time.sleep(0.5)
+                    
+                    # Delete the folder with all successfully synced files
+                    shutil.rmtree(expiry_folder)
+                    folders_deleted += 1
+                    logger.info(f"Deleted local folder after successful sync: {folder_path}")
+                except Exception as e:
+                    logger.error(f"Failed to delete folder {folder_path}: {e}")
+            else:
+                logger.warning(
+                    f"Skipping deletion of {folder_path}: Only {stats['success']}/{stats['total']} "
+                    f"files were successfully uploaded."
+                )
         
+        # Update transaction log
+        self.s3_sync_log[sync_id]["completed"] = datetime.now(timezone.utc).isoformat()
+        self.s3_sync_log[sync_id]["folders_deleted"] = folders_deleted
+        
+        logger.info(
+            f"S3 sync completed: {self.s3_sync_log[sync_id]['successful_uploads']}/"
+            f"{self.s3_sync_log[sync_id]['total_files']} files uploaded successfully, "
+            f"{folders_deleted} folders deleted."
+        )
+        
+        # Return success only if all uploads succeeded
+        return self.s3_sync_log[sync_id]["successful_uploads"] == self.s3_sync_log[sync_id]["total_files"]
+    
     def rotate_data_directory(self):
         """
         Renames the current BASE_SAVE_PATH directory to a timestamped folder,
@@ -738,15 +825,26 @@ class OptionsDataStore:
         """
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         rotated_path = self.base_path.parent / f"data_{timestamp}"
+        
         try:
-            # Rename the current folder atomically
+            # Create new directory first to avoid race condition
+            temp_new_path = self.base_path.parent / f"data_new_{timestamp}"
+            temp_new_path.mkdir(parents=True, exist_ok=True)
+            
+            # Now rename the current directory
             self.base_path.rename(rotated_path)
             logger.info(f"Rotated data folder: {self.base_path} -> {rotated_path}")
-            # Recreate the original folder for new data
-            self.base_path.mkdir(parents=True, exist_ok=True)
+            
+            # Rename the temp directory to the original name
+            temp_new_path.rename(self.base_path)
+            
             return rotated_path
         except Exception as e:
             logger.error(f"Failed to rotate data directory: {e}")
+            # If something went wrong but the base_path no longer exists, recreate it
+            if not self.base_path.exists():
+                self.base_path.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Recreated base directory after failed rotation: {self.base_path}")
             return None    
     
     async def run_cycle(self):
@@ -773,7 +871,11 @@ class OptionsDataStore:
         # Normal 5-minute cycle
         cycle_start = time.time()
         await self.process_instruments_in_chunks()
-        await self.write_buffered_data()
+        
+        # Force flush and write all buffers at the end of each cycle
+        # This ensures data is written even if buffer size is less than CHUNK_SIZE
+        await self.write_buffered_data(force_flush=True)
+        
         await self.log_metrics()
         cycle_duration = time.time() - cycle_start
         logger.info(f"Cycle completed in {cycle_duration:.2f} seconds")
