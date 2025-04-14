@@ -133,9 +133,6 @@ async def main():
             logger.error(f"Critical error in main loop: {e}")
             delay = conn_manager.connection_failed()
             await asyncio.sleep(delay)
-        finally:
-            if not conn_manager.should_reset_connection():
-                await store.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
