@@ -1,0 +1,178 @@
+import asyncio
+import logging
+import os
+from datetime import datetime, timedelta, timezone
+import math
+import signal
+from typing import Optional
+import yaml
+from dotenv import load_dotenv
+
+from instrument_fetcher import fetch_option_instruments
+from snapshot_manager import process_and_write_snapshot
+from s3_uploader import S3Uploader
+from ws import WsManager
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Load environment variables
+load_dotenv()
+
+class OptionsDataCollector:
+    """Main orchestrator for the options data collection pipeline."""
+    
+    def __init__(self, config_path: str = 'config.yaml'):
+        self.config = self._load_config(config_path)
+        self.manager: Optional[WsManager] = None
+        self.s3_uploader = S3Uploader()
+        self.running = False
+        self._setup_signal_handlers()
+
+    def _load_config(self, config_path: str) -> dict:
+        """Load configuration from YAML file or use env variables."""
+        config = {
+            'snapshot_interval': int(os.getenv('SNAPSHOT_INTERVAL', 3600)),
+            'temp_data_path': os.getenv('LOCAL_DATA_PATH', './temp_data'),
+            's3_bucket': os.getenv('S3_BUCKET', 'your-bucket-name'),
+            's3_prefix': os.getenv('S3_PREFIX', 'options-data'),
+            'max_channels_per_conn': int(os.getenv('MAX_CHANNELS_PER_CONN', 500)),
+            'heartbeat_interval': int(os.getenv('HEARTBEAT_INTERVAL', 30)),
+        }
+        
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config.update(yaml.safe_load(f))
+        
+        return config
+
+    def _setup_signal_handlers(self):
+        """Setup handlers for graceful shutdown."""
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, self._handle_shutdown)
+
+    def _handle_shutdown(self, signum, frame):
+        """Handle shutdown signals."""
+        logger.info("Shutdown signal received, stopping collector...")
+        self.running = False
+
+    async def initialize(self):
+        """Initialize WebSocket manager with fetched instruments."""
+        try:
+            logger.info("Fetching option instruments...")
+            channels = await fetch_option_instruments()
+            
+            if not channels:
+                raise RuntimeError("No option instruments found")
+            
+            logger.info(f"Initializing WebSocket manager with {len(channels)} channels")
+            self.manager = WsManager(
+                all_channels=channels,
+                max_channels_per_conn=self.config['max_channels_per_conn'],
+                heartbeat_interval=self.config['heartbeat_interval']
+            )
+            self.manager.start()
+            logger.info("WebSocket manager started successfully")
+            return True
+            
+        except Exception as e:
+            logger.exception("Failed to initialize: %s", e)
+            return False
+
+    async def process_snapshot(self):
+        """Process a snapshot and upload to S3."""
+        try:
+            # Get snapshot
+            snapshot = self.manager.pop_snapshot()
+            if not snapshot:
+                logger.warning("Empty snapshot, skipping processing")
+                return False
+
+            # Process and write to local Parquet
+            timestamp = datetime.now(timezone.utc)
+            local_path = os.path.join(
+                self.config['temp_data_path'],
+                timestamp.strftime('%Y%m%d_%H%M%S')
+            )
+            
+            result_path = process_and_write_snapshot(
+                snapshot_data=snapshot,
+                timestamp=timestamp,
+                base_path=local_path
+            )
+            
+            if not result_path:
+                logger.error("Failed to process and write snapshot")
+                return False
+
+            # Upload to S3
+            s3_key_prefix = os.path.join(
+                self.config['s3_prefix'],
+                timestamp.strftime('%Y/%m/%d/%H')
+            )
+            
+            success, uploaded = self.s3_uploader.upload_to_s3(
+                local_path=result_path,
+                s3_bucket=self.config['s3_bucket'],
+                s3_key_prefix=s3_key_prefix,
+                delete_local=True  # Clean up after upload
+            )
+            
+            return success
+
+        except Exception as e:
+            logger.exception("Error processing snapshot: %s", e)
+            return False
+
+    async def run(self):
+        """Main run loop."""
+        self.running = True
+        
+        if not await self.initialize():
+            logger.error("Initialization failed, exiting")
+            return
+
+        logger.info("Starting main collection loop")
+        while self.running:
+            try:
+                # First, calculate the target time for the next minute
+                now = datetime.now(timezone.utc)
+                next_minute = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+                
+                # Calculate and wait the exact time until next minute
+                wait_time = (next_minute - now).total_seconds()
+                logger.debug(f"Waiting {wait_time:.3f} seconds until {next_minute.strftime('%H:%M:%S')}")
+                await asyncio.sleep(wait_time)
+                
+                # After wait, immediately start the snapshot process
+                start_time = datetime.now(timezone.utc)
+                success = await self.process_snapshot()
+                
+                if not success:
+                    logger.warning("Failed to process snapshot, will retry next minute")
+                else:
+                    process_time = (datetime.now(timezone.utc) - start_time).total_seconds()
+                    logger.debug(f"Snapshot processing took {process_time:.3f} seconds")
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.exception("Error in main loop: %s", e)
+                # On error, wait a few seconds then align with next minute
+                await asyncio.sleep(5)
+
+        # Cleanup
+        if self.manager:
+            self.manager.stop()
+        logger.info("Collector stopped")
+
+if __name__ == "__main__":
+    collector = OptionsDataCollector()
+    try:
+        asyncio.run(collector.run())
+    except KeyboardInterrupt:
+        pass
