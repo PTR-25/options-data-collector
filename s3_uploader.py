@@ -125,15 +125,17 @@ class S3Uploader:
                 asyncio.sleep(2 ** attempt)
         return False
 
-    def _upload_file(self, local_file: str, bucket: str, s3_key: str) -> bool:
+    def _upload_file(self, local_file: str, bucket: str, s3_key_prefix: str) -> bool:
         """Upload a single file to S3. Raises exceptions on failure for retry logic."""
         try:
-            # Ensure s3_key is treated as a prefix for single files
-            if not s3_key.endswith(os.path.basename(local_file)):
-                s3_key = os.path.join(s3_key, os.path.basename(local_file)).replace('\\', '/')
+            # Keep the exact path structure as provided in s3_key_prefix
+            s3_key = s3_key_prefix
+            if os.path.isfile(local_file):
+                s3_key = os.path.join(s3_key_prefix, os.path.basename(local_file)).replace('\\', '/')
             
+            logger.debug(f"Uploading {local_file} to s3://{bucket}/{s3_key}")
             self.s3_client.upload_file(local_file, bucket, s3_key)
-            logger.debug(f"Uploaded {local_file} to s3://{bucket}/{s3_key}")
+            logger.debug(f"Successfully uploaded to s3://{bucket}/{s3_key}")
             return True
         except ClientError as e:
             logger.error(f"Failed to upload {local_file}: {e}")

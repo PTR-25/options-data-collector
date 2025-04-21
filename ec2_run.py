@@ -62,100 +62,114 @@ class EC2OptionsDataCollector(OptionsDataCollector):
     async def aggregate_and_upload_hourly(self, hour_datetime: datetime) -> bool:
         """Aggregate the last hour's minute-level files into hourly files and upload to S3."""
         try:
-            # Get all files from the previous hour
-            hour_str = hour_datetime.strftime('%Y/%m/%d/%H')
+            # Base path and hour string
             base_path = self.config['temp_data_path']
+            hour_str = hour_datetime.strftime('%Y-%m-%d/%H')  # For S3 path
             
             logger.info(f"Starting hourly aggregation for {hour_str}")
             
-            # Find all relevant directories from the past hour
-            pattern = os.path.join(base_path, f"{hour_datetime.strftime('%Y%m%d')}*")
-            minute_dirs = glob.glob(pattern)
+            # First level: coin directories
+            success = True
+            coin_dirs = glob.glob(os.path.join(base_path, "coin=*"))
             
-            if not minute_dirs:
-                logger.error(f"No minute directories found matching pattern: {pattern}")
+            if not coin_dirs:
+                logger.error(f"No coin directories found in {base_path}")
                 return False
             
-            logger.info(f"Found {len(minute_dirs)} minute directories to process")
+            logger.info(f"Found {len(coin_dirs)} coins to process")
             
-            # Process by coin
-            success = True
-            processed_coins = set()
-            
-            for minute_dir in minute_dirs:
-                coin_dirs = glob.glob(os.path.join(minute_dir, "coin=*"))
-                for coin_dir in coin_dirs:
-                    try:
-                        coin = os.path.basename(coin_dir).replace('coin=', '')
-                        if coin in processed_coins:
-                            continue
-                            
-                        logger.info(f"Processing {coin} data from {minute_dir}")
-                        
-                        # Find all parquet files for this coin across all minute dirs
-                        all_parquet_files = []
-                        for mdir in minute_dirs:
-                            pattern = os.path.join(mdir, f"coin={coin}", "**/*.parquet")
-                            all_parquet_files.extend(glob.glob(pattern, recursive=True))
-                        
-                        if not all_parquet_files:
-                            logger.warning(f"No parquet files found for {coin}")
-                            continue
-                            
-                        # Read and concatenate all files
-                        dfs = []
+            for coin_dir in coin_dirs:
+                try:
+                    coin = os.path.basename(coin_dir).replace('coin=', '')
+                    logger.info(f"Processing {coin}")
+                    
+                    # Find all parquet files for this coin and hour
+                    date_path = os.path.join(coin_dir, f"date={hour_datetime.strftime('%Y-%m-%d')}")
+                    if not os.path.exists(date_path):
+                        logger.warning(f"No data for {coin} on {hour_datetime.strftime('%Y-%m-%d')}")
+                        continue
+                    
+                    # Collect all files from all expiry dates for this hour
+                    all_parquet_files = []
+                    for expiry_dir in glob.glob(os.path.join(date_path, "expiry=*")):
+                        hour_path = os.path.join(expiry_dir, f"hour={hour_datetime.strftime('%H')}")
+                        if os.path.exists(hour_path):
+                            parquet_files = glob.glob(os.path.join(hour_path, "*.parquet"))
+                            all_parquet_files.extend(parquet_files)
+                    
+                    if not all_parquet_files:
+                        logger.warning(f"No parquet files found for {coin} in hour {hour_str}")
+                        continue
+                    
+                    logger.info(f"Found {len(all_parquet_files)} files for {coin}")
+                    
+                    # Read and concatenate all files
+                    dfs = []
+                    for pf in all_parquet_files:
+                        try:
+                            df = pd.read_parquet(pf)
+                            dfs.append(df)
+                        except Exception as e:
+                            logger.error(f"Error reading {pf}: {e}")
+                    
+                    if not dfs:
+                        continue
+                    
+                    # Combine all snapshots
+                    hourly_df = pd.concat(dfs, ignore_index=True)
+                    
+                    # Write hourly file preserving the structure
+                    hourly_base = os.path.join(base_path, 'hourly')
+                    hourly_path = os.path.join(
+                        hourly_base,
+                        f"coin={coin}",
+                        f"date={hour_datetime.strftime('%Y-%m-%d')}",
+                        f"hour={hour_datetime.strftime('%H')}"
+                    )
+                    os.makedirs(hourly_path, exist_ok=True)
+                    
+                    hourly_file = os.path.join(hourly_path, f"{coin}_hourly.parquet")
+                    hourly_df.to_parquet(hourly_file, compression='snappy')
+                    
+                    # Upload to S3 with consistent structure
+                    s3_key_prefix = os.path.join(
+                        self.config['s3_prefix'],
+                        'hourly',
+                        f"coin={coin}",
+                        f"date={hour_datetime.strftime('%Y-%m-%d')}",
+                        f"hour={hour_datetime.strftime('%H')}"
+                    ).replace('\\', '/')  # Ensure forward slashes for S3
+                    
+                    upload_success, _ = self.s3_uploader.upload_to_s3(
+                        local_path=hourly_file,  # Changed from hourly_path to hourly_file
+                        s3_bucket=self.config['s3_bucket'],
+                        s3_key_prefix=s3_key_prefix,
+                        delete_local=True
+                    )
+                    
+                    if upload_success:
+                        logger.info(f"Successfully uploaded hourly data for {coin}")
+                        # Clean up minute files only after successful upload
                         for pf in all_parquet_files:
                             try:
-                                df = pd.read_parquet(pf)
-                                dfs.append(df)
-                            except Exception as e:
-                                logger.error(f"Error reading {pf}: {e}")
-                        
-                        if not dfs:
-                            continue
-                        
-                        # Combine all snapshots
-                        hourly_df = pd.concat(dfs, ignore_index=True)
-                        
-                        # Write hourly file
-                        hourly_path = os.path.join(
-                            base_path,
-                            'hourly',
-                            hour_str,
-                            f"coin={coin}"
-                        )
-                        os.makedirs(hourly_path, exist_ok=True)
-                        
-                        hourly_file = os.path.join(hourly_path, "hourly_data.parquet")
-                        hourly_df.to_parquet(hourly_file, compression='snappy')
-                        
-                        # Upload to S3
-                        s3_key_prefix = os.path.join(
-                            self.config['s3_prefix'],
-                            'hourly',
-                            hour_str
-                        )
-                        
-                        upload_success, _ = self.s3_uploader.upload_to_s3(
-                            local_path=hourly_path,
-                            s3_bucket=self.config['s3_bucket'],
-                            s3_key_prefix=s3_key_prefix,
-                            delete_local=True
-                        )
-                        
-                        if upload_success:
-                            logger.info(f"Successfully uploaded hourly data for {coin}")
-                            processed_coins.add(coin)
-                            # Clean up minute files only after successful upload
-                            for pf in all_parquet_files:
-                                try:
-                                    os.remove(pf)
-                                except OSError as e:
-                                    logger.warning(f"Error removing {pf}: {e}")
-                                    
-                    except Exception as e:
-                        logger.exception(f"Error processing {coin}: {e}")
+                                os.remove(pf)
+                                # Remove empty directories
+                                dir_path = os.path.dirname(pf)
+                                while dir_path > base_path:
+                                    if not os.listdir(dir_path):
+                                        os.rmdir(dir_path)
+                                        dir_path = os.path.dirname(dir_path)
+                                    else:
+                                        break
+                            except OSError as e:
+                                logger.warning(f"Error cleaning up {pf}: {e}")
+                    else:
+                        logger.error(f"Failed to upload hourly data for {coin}")
                         success = False
+                        
+                except Exception as e:
+                    logger.exception(f"Error processing {coin}: {e}")
+                    success = False
             
             return success
             
