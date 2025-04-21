@@ -86,17 +86,16 @@ class OptionsDataCollector:
     async def process_snapshot(self):
         """Process a snapshot and save locally."""
         try:
-            # Get snapshot
             snapshot = self.manager.pop_snapshot()
             if not snapshot:
                 logger.warning("Empty snapshot, skipping processing")
                 return False
 
-            # Process and write to local Parquet
+            # Process and write to local Parquet using hourly directory structure
             timestamp = datetime.now(timezone.utc)
             local_path = os.path.join(
                 self.config['temp_data_path'],
-                timestamp.strftime('%Y%m%d_%H%M%S')
+                timestamp.strftime('%Y/%m/%d/%H')  # Changed to hourly format
             )
             
             result_path = process_and_write_snapshot(
