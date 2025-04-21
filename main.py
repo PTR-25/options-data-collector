@@ -91,12 +91,10 @@ class OptionsDataCollector:
                 logger.warning("Empty snapshot, skipping processing")
                 return False
 
-            # Process and write to local Parquet using hourly directory structure
+            # Process and write to local Parquet
             timestamp = datetime.now(timezone.utc)
-            local_path = os.path.join(
-                self.config['temp_data_path'],
-                timestamp.strftime('%Y/%m/%d/%H')  # Changed to hourly format
-            )
+            # Base path only, partitioning will handle the rest
+            local_path = self.config['temp_data_path']
             
             result_path = process_and_write_snapshot(
                 snapshot_data=snapshot,
