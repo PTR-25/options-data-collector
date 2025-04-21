@@ -1,3 +1,8 @@
+from dotenv import load_dotenv
+
+# Load environment variables first
+load_dotenv()
+
 import asyncio
 import logging
 import os
@@ -6,7 +11,6 @@ import math
 import signal
 from typing import Optional
 import yaml
-from dotenv import load_dotenv
 
 from instrument_fetcher import fetch_option_instruments
 from snapshot_manager import process_and_write_snapshot
@@ -19,9 +23,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# Load environment variables
-load_dotenv()
 
 class OptionsDataCollector:
     """Main orchestrator for the options data collection pipeline."""

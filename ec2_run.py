@@ -1,3 +1,8 @@
+from dotenv import load_dotenv
+
+# Load environment variables first, before any other imports or configuration
+load_dotenv()
+
 import asyncio
 import logging
 import os
@@ -7,21 +12,22 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import glob
-from dotenv import load_dotenv
 
 from main import OptionsDataCollector
 from instrument_fetcher import fetch_option_instruments
 
-# Load environment variables
-load_dotenv()
-
-# Configure logging
+# Configure logging after env vars are loaded
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     filename=os.getenv('EC2_LOG_PATH', '/var/log/options-collector/collector.log')  # Log to file on EC2
 )
 logger = logging.getLogger(__name__)
+
+# Add diagnostic prints
+logger.info(f"S3_BUCKET from environment: {os.getenv('S3_BUCKET')}")
+logger.info(f"Current working directory: {os.getcwd()}")
+logger.info(f".env file location: {os.path.abspath('.env')}")
 
 class EC2OptionsDataCollector(OptionsDataCollector):
     def __init__(self, config_path: str = os.getenv('EC2_CONFIG_PATH', '/etc/options-collector/config.yaml')):

@@ -5,6 +5,12 @@ from concurrent.futures import ThreadPoolExecutor
 import boto3
 from botocore.exceptions import ClientError
 import asyncio
+from dotenv import load_dotenv
+
+# Load environment variables first
+load_dotenv()
+
+print("S3_BUCKET:", os.getenv("S3_BUCKET"))
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +18,8 @@ class S3Uploader:
     """Handles uploading Parquet datasets to S3 with retries and parallel uploads."""
     
     def __init__(self, max_workers: int = 4, max_retries: int = 3):
+        # Add diagnostic logging
+        logger.info(f"Initializing S3Uploader with bucket: {os.getenv('S3_BUCKET')}")
         self.s3_client = boto3.client('s3')
         self.max_workers = max_workers
         self.max_retries = max_retries
