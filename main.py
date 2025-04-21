@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 import math
 import signal
 from typing import Optional
-import yaml
 
 from instrument_fetcher import fetch_option_instruments
 from snapshot_manager import process_and_write_snapshot
@@ -27,28 +26,28 @@ logger = logging.getLogger(__name__)
 class OptionsDataCollector:
     """Main orchestrator for the options data collection pipeline."""
     
-    def __init__(self, config_path: str = 'config.yaml'):
-        self.config = self._load_config(config_path)
+    def __init__(self):
+        self.config = self._load_config()
         self.manager: Optional[WsManager] = None
         self.s3_uploader = S3Uploader()
         self.running = False
         self._setup_signal_handlers()
 
-    def _load_config(self, config_path: str) -> dict:
-        """Load configuration from YAML file or use env variables."""
+    def _load_config(self) -> dict:
+        """Load configuration from environment variables."""
         config = {
             'snapshot_interval': int(os.getenv('SNAPSHOT_INTERVAL', 3600)),
             'temp_data_path': os.getenv('LOCAL_DATA_PATH', './temp_data'),
-            's3_bucket': os.getenv('S3_BUCKET', 'your-bucket-name'),
+            's3_bucket': os.getenv('S3_BUCKET'),
             's3_prefix': os.getenv('S3_PREFIX', 'options-data'),
             'max_channels_per_conn': int(os.getenv('MAX_CHANNELS_PER_CONN', 500)),
             'heartbeat_interval': int(os.getenv('HEARTBEAT_INTERVAL', 30)),
         }
         
-        if os.path.exists(config_path):
-            with open(config_path, 'r') as f:
-                config.update(yaml.safe_load(f))
-        
+        # Validate required environment variables
+        if not config['s3_bucket']:
+            raise ValueError("S3_BUCKET environment variable must be set")
+            
         return config
 
     def _setup_signal_handlers(self):

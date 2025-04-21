@@ -30,8 +30,8 @@ logger.info(f"Current working directory: {os.getcwd()}")
 logger.info(f".env file location: {os.path.abspath('.env')}")
 
 class EC2OptionsDataCollector(OptionsDataCollector):
-    def __init__(self, config_path: str = os.getenv('EC2_CONFIG_PATH', '/etc/options-collector/config.yaml')):
-        super().__init__(config_path)
+    def __init__(self):  # Remove config_path parameter
+        super().__init__()  # Remove config_path parameter
         self.last_refresh_date = None
         self.last_aggregation_hour = None
 
@@ -197,20 +197,6 @@ def setup_ec2_environment():
     # Create necessary directories
     os.makedirs(os.getenv('EC2_LOG_PATH', '/var/log/options-collector'), exist_ok=True)
     os.makedirs(os.getenv('EC2_TEMP_PATH', '/tmp/options-collector'), exist_ok=True)
-
-    config_path = os.getenv('EC2_CONFIG_PATH', '/etc/options-collector/config.yaml')
-    if not os.path.exists(config_path):
-        default_config = {
-            'snapshot_interval': int(os.getenv('SNAPSHOT_INTERVAL', 3600)),  # 1 hour in production
-            'temp_data_path': os.getenv('EC2_TEMP_PATH', '/tmp/options-collector'),
-            's3_bucket': os.getenv('S3_BUCKET', 'your-production-bucket'),
-            's3_prefix': os.getenv('S3_PREFIX', 'options-data'),
-            'max_channels_per_conn': int(os.getenv('MAX_CHANNELS_PER_CONN', 500)),
-            'heartbeat_interval': int(os.getenv('HEARTBEAT_INTERVAL', 30)),
-        }
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        with open(config_path, 'w') as f:
-            yaml.dump(default_config, f)
 
 if __name__ == "__main__":
     setup_ec2_environment()

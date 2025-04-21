@@ -20,7 +20,14 @@ class S3Uploader:
     def __init__(self, max_workers: int = 4, max_retries: int = 3):
         # Add diagnostic logging
         logger.info(f"Initializing S3Uploader with bucket: {os.getenv('S3_BUCKET')}")
-        self.s3_client = boto3.client('s3')
+        
+        # Initialize S3 client with region
+        self.s3_client = boto3.client(
+            's3',
+            region_name=os.getenv('AWS_REGION', 'eu-west-2')
+        )
+        logger.info(f"Using AWS region: {os.getenv('AWS_REGION', 'eu-west-2')}")
+        
         self.max_workers = max_workers
         self.max_retries = max_retries
 
