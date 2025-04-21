@@ -84,7 +84,7 @@ class OptionsDataCollector:
             return False
 
     async def process_snapshot(self):
-        """Process a snapshot and upload to S3."""
+        """Process a snapshot and save locally."""
         try:
             # Get snapshot
             snapshot = self.manager.pop_snapshot()
@@ -109,20 +109,7 @@ class OptionsDataCollector:
                 logger.error("Failed to process and write snapshot")
                 return False
 
-            # Upload to S3
-            s3_key_prefix = os.path.join(
-                self.config['s3_prefix'],
-                timestamp.strftime('%Y/%m/%d/%H')
-            )
-            
-            success, uploaded = self.s3_uploader.upload_to_s3(
-                local_path=result_path,
-                s3_bucket=self.config['s3_bucket'],
-                s3_key_prefix=s3_key_prefix,
-                delete_local=True  # Clean up after upload
-            )
-            
-            return success
+            return True
 
         except Exception as e:
             logger.exception("Error processing snapshot: %s", e)

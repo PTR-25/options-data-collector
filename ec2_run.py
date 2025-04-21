@@ -68,73 +68,80 @@ class EC2OptionsDataCollector(OptionsDataCollector):
             
             logger.info(f"Starting hourly aggregation for {hour_str}")
             
+            success = True  # Track overall success
             # Find all coin directories
             coin_dirs = [d for d in glob.glob(os.path.join(base_path, "coin=*")) if os.path.isdir(d)]
             
             for coin_dir in coin_dirs:
-                coin = os.path.basename(coin_dir).replace('coin=', '')
-                logger.info(f"Aggregating data for {coin}")
-                
-                # Read all parquet files for this coin-hour
-                parquet_files = glob.glob(os.path.join(coin_dir, "*.parquet"))
-                if not parquet_files:
-                    logger.warning(f"No parquet files found for {coin} in {hour_str}")
-                    continue
-                
-                # Read and concatenate all files
-                dfs = []
-                for pf in parquet_files:
-                    try:
-                        df = pd.read_parquet(pf)
-                        dfs.append(df)
-                    except Exception as e:
-                        logger.error(f"Error reading {pf}: {e}")
-                
-                if not dfs:
-                    continue
-                
-                # Combine all minute snapshots
-                hourly_df = pd.concat(dfs, ignore_index=True)
-                
-                # Create hourly aggregated file
-                hourly_path = os.path.join(
-                    self.config['temp_data_path'],
-                    'hourly',
-                    hour_str,
-                    f"coin={coin}"
-                )
-                os.makedirs(hourly_path, exist_ok=True)
-                
-                # Write hourly parquet file
-                hourly_file = os.path.join(hourly_path, "hourly_data.parquet")
-                hourly_df.to_parquet(hourly_file, compression='snappy')
-                
-                # Upload to S3
-                s3_key_prefix = os.path.join(
-                    self.config['s3_prefix'],
-                    'hourly',
-                    hour_str
-                )
-                
-                success, _ = self.s3_uploader.upload_to_s3(
-                    local_path=hourly_path,
-                    s3_bucket=self.config['s3_bucket'],
-                    s3_key_prefix=s3_key_prefix,
-                    delete_local=True
-                )
-                
-                if success:
-                    logger.info(f"Successfully uploaded hourly data for {coin} - {hour_str}")
-                    # Clean up minute-level files
+                try:
+                    coin = os.path.basename(coin_dir).replace('coin=', '')
+                    logger.info(f"Aggregating data for {coin}")
+                    
+                    # Read all parquet files for this coin-hour
+                    parquet_files = glob.glob(os.path.join(coin_dir, "*.parquet"))
+                    if not parquet_files:
+                        logger.warning(f"No parquet files found for {coin} in {hour_str}")
+                        continue
+                    
+                    # Read and concatenate all files
+                    dfs = []
                     for pf in parquet_files:
                         try:
-                            os.remove(pf)
-                        except OSError as e:
-                            logger.warning(f"Error removing minute file {pf}: {e}")
-                else:
-                    logger.error(f"Failed to upload hourly data for {coin} - {hour_str}")
+                            df = pd.read_parquet(pf)
+                            dfs.append(df)
+                        except Exception as e:
+                            logger.error(f"Error reading {pf}: {e}")
+                    
+                    if not dfs:
+                        continue
+                    
+                    # Combine all minute snapshots
+                    hourly_df = pd.concat(dfs, ignore_index=True)
+                    
+                    # Create hourly aggregated file
+                    hourly_path = os.path.join(
+                        self.config['temp_data_path'],
+                        'hourly',
+                        hour_str,
+                        f"coin={coin}"
+                    )
+                    os.makedirs(hourly_path, exist_ok=True)
+                    
+                    # Write hourly parquet file
+                    hourly_file = os.path.join(hourly_path, "hourly_data.parquet")
+                    hourly_df.to_parquet(hourly_file, compression='snappy')
+                    
+                    # Upload to S3
+                    s3_key_prefix = os.path.join(
+                        self.config['s3_prefix'],
+                        'hourly',
+                        hour_str
+                    )
+                    
+                    upload_success, _ = self.s3_uploader.upload_to_s3(
+                        local_path=hourly_path,
+                        s3_bucket=self.config['s3_bucket'],
+                        s3_key_prefix=s3_key_prefix,
+                        delete_local=True
+                    )
+                    
+                    if upload_success:
+                        logger.info(f"Successfully uploaded hourly data for {coin} - {hour_str}")
+                        # Only delete minute files after successful S3 upload
+                        for pf in parquet_files:
+                            try:
+                                os.remove(pf)
+                            except OSError as e:
+                                logger.warning(f"Error removing minute file {pf}: {e}")
+                    else:
+                        logger.error(f"Failed to upload hourly data for {coin} - {hour_str}")
+                        success = False  # Mark overall process as failed
+                        
+                except Exception as e:
+                    logger.exception(f"Error processing {coin}: {e}")
+                    success = False
             
-            return True
+            return success
             
         except Exception as e:
             logger.exception(f"Error during hourly aggregation: {e}")
