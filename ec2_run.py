@@ -62,84 +62,100 @@ class EC2OptionsDataCollector(OptionsDataCollector):
     async def aggregate_and_upload_hourly(self, hour_datetime: datetime) -> bool:
         """Aggregate the last hour's minute-level files into hourly files and upload to S3."""
         try:
-            # Calculate the hour we're aggregating
+            # Get all files from the previous hour
             hour_str = hour_datetime.strftime('%Y/%m/%d/%H')
-            base_path = os.path.join(self.config['temp_data_path'], hour_str)
+            base_path = self.config['temp_data_path']
             
             logger.info(f"Starting hourly aggregation for {hour_str}")
             
-            success = True  # Track overall success
-            # Find all coin directories
-            coin_dirs = [d for d in glob.glob(os.path.join(base_path, "coin=*")) if os.path.isdir(d)]
+            # Find all relevant directories from the past hour
+            pattern = os.path.join(base_path, f"{hour_datetime.strftime('%Y%m%d')}*")
+            minute_dirs = glob.glob(pattern)
             
-            for coin_dir in coin_dirs:
-                try:
-                    coin = os.path.basename(coin_dir).replace('coin=', '')
-                    logger.info(f"Aggregating data for {coin}")
-                    
-                    # Read all parquet files for this coin-hour
-                    parquet_files = glob.glob(os.path.join(coin_dir, "*.parquet"))
-                    if not parquet_files:
-                        logger.warning(f"No parquet files found for {coin} in {hour_str}")
-                        continue
-                    
-                    # Read and concatenate all files
-                    dfs = []
-                    for pf in parquet_files:
-                        try:
-                            df = pd.read_parquet(pf)
-                            dfs.append(df)
-                        except Exception as e:
-                            logger.error(f"Error reading {pf}: {e}")
-                    
-                    if not dfs:
-                        continue
-                    
-                    # Combine all minute snapshots
-                    hourly_df = pd.concat(dfs, ignore_index=True)
-                    
-                    # Create hourly aggregated file
-                    hourly_path = os.path.join(
-                        self.config['temp_data_path'],
-                        'hourly',
-                        hour_str,
-                        f"coin={coin}"
-                    )
-                    os.makedirs(hourly_path, exist_ok=True)
-                    
-                    # Write hourly parquet file
-                    hourly_file = os.path.join(hourly_path, "hourly_data.parquet")
-                    hourly_df.to_parquet(hourly_file, compression='snappy')
-                    
-                    # Upload to S3
-                    s3_key_prefix = os.path.join(
-                        self.config['s3_prefix'],
-                        'hourly',
-                        hour_str
-                    )
-                    
-                    upload_success, _ = self.s3_uploader.upload_to_s3(
-                        local_path=hourly_path,
-                        s3_bucket=self.config['s3_bucket'],
-                        s3_key_prefix=s3_key_prefix,
-                        delete_local=True
-                    )
-                    
-                    if upload_success:
-                        logger.info(f"Successfully uploaded hourly data for {coin} - {hour_str}")
-                        # Only delete minute files after successful S3 upload
-                        for pf in parquet_files:
-                            try:
-                                os.remove(pf)
-                            except OSError as e:
-                                logger.warning(f"Error removing minute file {pf}: {e}")
-                    else:
-                        logger.error(f"Failed to upload hourly data for {coin} - {hour_str}")
-                        success = False  # Mark overall process as failed
+            if not minute_dirs:
+                logger.error(f"No minute directories found matching pattern: {pattern}")
+                return False
+            
+            logger.info(f"Found {len(minute_dirs)} minute directories to process")
+            
+            # Process by coin
+            success = True
+            processed_coins = set()
+            
+            for minute_dir in minute_dirs:
+                coin_dirs = glob.glob(os.path.join(minute_dir, "coin=*"))
+                for coin_dir in coin_dirs:
+                    try:
+                        coin = os.path.basename(coin_dir).replace('coin=', '')
+                        if coin in processed_coins:
+                            continue
+                            
+                        logger.info(f"Processing {coin} data from {minute_dir}")
                         
-                except Exception as e:
-                    logger.exception(f"Error processing {coin}: {e}")
-                    success = False
+                        # Find all parquet files for this coin across all minute dirs
+                        all_parquet_files = []
+                        for mdir in minute_dirs:
+                            pattern = os.path.join(mdir, f"coin={coin}", "**/*.parquet")
+                            all_parquet_files.extend(glob.glob(pattern, recursive=True))
+                        
+                        if not all_parquet_files:
+                            logger.warning(f"No parquet files found for {coin}")
+                            continue
+                            
+                        # Read and concatenate all files
+                        dfs = []
+                        for pf in all_parquet_files:
+                            try:
+                                df = pd.read_parquet(pf)
+                                dfs.append(df)
+                            except Exception as e:
+                                logger.error(f"Error reading {pf}: {e}")
+                        
+                        if not dfs:
+                            continue
+                        
+                        # Combine all snapshots
+                        hourly_df = pd.concat(dfs, ignore_index=True)
+                        
+                        # Write hourly file
+                        hourly_path = os.path.join(
+                            base_path,
+                            'hourly',
+                            hour_str,
+                            f"coin={coin}"
+                        )
+                        os.makedirs(hourly_path, exist_ok=True)
+                        
+                        hourly_file = os.path.join(hourly_path, "hourly_data.parquet")
+                        hourly_df.to_parquet(hourly_file, compression='snappy')
+                        
+                        # Upload to S3
+                        s3_key_prefix = os.path.join(
+                            self.config['s3_prefix'],
+                            'hourly',
+                            hour_str
+                        )
+                        
+                        upload_success, _ = self.s3_uploader.upload_to_s3(
+                            local_path=hourly_path,
+                            s3_bucket=self.config['s3_bucket'],
+                            s3_key_prefix=s3_key_prefix,
+                            delete_local=True
+                        )
+                        
+                        if upload_success:
+                            logger.info(f"Successfully uploaded hourly data for {coin}")
+                            processed_coins.add(coin)
+                            # Clean up minute files only after successful upload
+                            for pf in all_parquet_files:
+                                try:
+                                    os.remove(pf)
+                                except OSError as e:
+                                    logger.warning(f"Error removing {pf}: {e}")
+                                    
+                    except Exception as e:
+                        logger.exception(f"Error processing {coin}: {e}")
+                        success = False
             
             return success
             
@@ -158,34 +174,29 @@ class EC2OptionsDataCollector(OptionsDataCollector):
         logger.info("Starting main collection loop")
         while self.running:
             try:
-                # 1. Calculate target time for next minute
                 now = datetime.now(timezone.utc)
                 next_minute = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
-                wait_time = (next_minute - now).total_seconds()
                 
-                # 2. Wait precisely until next minute
+                # Check if we're at the start of an hour
+                if now.minute == 0 and now.second < 30:
+                    # Always aggregate the previous hour at XX:00
+                    prev_hour = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+                    logger.info(f"Starting hourly aggregation at {now} for hour {prev_hour}")
+                    await self.aggregate_and_upload_hourly(prev_hour)
+                
+                # Wait for next minute
+                wait_time = (next_minute - now).total_seconds()
                 logger.debug(f"Waiting {wait_time:.3f} seconds until {next_minute.strftime('%H:%M:%S')}")
                 await asyncio.sleep(wait_time)
                 
-                # 3. Take snapshot immediately at minute start
+                # Take snapshot
                 start_time = datetime.now(timezone.utc)
                 success = await self.process_snapshot()
                 
                 if success:
                     process_time = (datetime.now(timezone.utc) - start_time).total_seconds()
                     logger.debug(f"Snapshot processing took {process_time:.3f} seconds")
-                    
-                    # 4. After successful snapshot, check if we need to aggregate
-                    # (we're at the start of an hour)
-                    if (start_time.minute == 0 and 
-                        (self.last_aggregation_hour is None or 
-                         start_time.replace(minute=0, second=0, microsecond=0) > self.last_aggregation_hour)):
-                        # Aggregate previous hour
-                        prev_hour = start_time.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
-                        await self.aggregate_and_upload_hourly(prev_hour)
-                        self.last_aggregation_hour = start_time.replace(minute=0, second=0, microsecond=0)
                 
-                # 5. Check for instrument refresh (if needed)
                 await self.check_instrument_refresh()
                 
             except asyncio.CancelledError:
