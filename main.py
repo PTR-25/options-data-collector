@@ -35,20 +35,31 @@ class OptionsDataCollector:
 
     def _load_config(self) -> dict:
         """Load configuration from environment variables."""
-        config = {
-            'snapshot_interval': int(os.getenv('SNAPSHOT_INTERVAL', 3600)),
-            'temp_data_path': os.getenv('LOCAL_DATA_PATH', './temp_data'),
-            's3_bucket': os.getenv('S3_BUCKET'),
-            's3_prefix': os.getenv('S3_PREFIX', 'options-data'),
-            'max_channels_per_conn': int(os.getenv('MAX_CHANNELS_PER_CONN', 500)),
-            'heartbeat_interval': int(os.getenv('HEARTBEAT_INTERVAL', 30)),
-        }
-        
-        # Validate required environment variables
-        if not config['s3_bucket']:
-            raise ValueError("S3_BUCKET environment variable must be set")
+        try:
+            # Clean and parse environment variables
+            snapshot_interval = os.getenv('SNAPSHOT_INTERVAL', '3600')
+            if '#' in snapshot_interval:  # Handle comments in env vars
+                snapshot_interval = snapshot_interval.split('#')[0].strip()
             
-        return config
+            config = {
+                'snapshot_interval': int(snapshot_interval),
+                'temp_data_path': os.getenv('LOCAL_DATA_PATH', './temp_data'),
+                's3_bucket': os.getenv('S3_BUCKET'),
+                's3_prefix': os.getenv('S3_PREFIX', 'options-data'),
+                'max_channels_per_conn': int(os.getenv('MAX_CHANNELS_PER_CONN', '500')),
+                'heartbeat_interval': int(os.getenv('HEARTBEAT_INTERVAL', '30')),
+            }
+            
+            # Validate required environment variables
+            if not config['s3_bucket']:
+                raise ValueError("S3_BUCKET environment variable must be set")
+                
+            return config
+            
+        except ValueError as e:
+            logger.error(f"Error parsing environment variables: {e}")
+            logger.error("Please check your .env file for correct numeric values without comments")
+            raise
 
     def _setup_signal_handlers(self):
         """Setup handlers for graceful shutdown."""

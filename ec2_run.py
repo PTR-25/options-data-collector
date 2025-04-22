@@ -12,6 +12,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import glob
+import shutil
+from pathlib import Path
 
 from main import OptionsDataCollector
 from instrument_fetcher import fetch_option_instruments
@@ -36,28 +38,52 @@ class EC2OptionsDataCollector(OptionsDataCollector):
         self.last_aggregation_hour = None
 
     async def check_instrument_refresh(self):
-        """Check if we need to refresh instruments."""
+        """Check if we need to refresh instruments at exactly 08:00 UTC."""
         now = datetime.now(timezone.utc)
         refresh_hour = int(os.getenv('DAILY_REFRESH_HOUR', 8))
-        target_time = time(hour=refresh_hour, minute=0)  # Refresh time from environment variable
         
-        # Check if it's past the refresh time and we haven't refreshed today
-        if (now.time() >= target_time and 
-            (self.last_refresh_date is None or 
-             now.date() > self.last_refresh_date)):
-            
-            logger.info("Starting daily instrument refresh...")
+        # Create target time in UTC
+        target_time = now.replace(
+            hour=refresh_hour,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+        
+        # Check if we're in the first 30 seconds of the target hour and haven't refreshed today
+        is_refresh_window = (
+            now.hour == refresh_hour and 
+            now.minute == 0 and 
+            now.second < 30
+        )
+        
+        needs_refresh = (
+            self.last_refresh_date is None or 
+            now.date() > self.last_refresh_date
+        )
+        
+        if is_refresh_window and needs_refresh:
+            logger.info(f"Starting daily instrument refresh at {now.isoformat()} UTC")
             try:
                 # Stop current manager
                 if self.manager:
                     self.manager.stop()
                 
                 # Fetch fresh instruments and reinitialize
-                await self.initialize()
-                self.last_refresh_date = now.date()
-                logger.info("Daily instrument refresh completed successfully")
+                refresh_success = await self.initialize()
+                if refresh_success:
+                    self.last_refresh_date = now.date()
+                    logger.info(f"Daily instrument refresh completed successfully at {datetime.now(timezone.utc).isoformat()} UTC")
+                    return True
+                else:
+                    logger.error("Failed to refresh instruments")
+                    return False
+                    
             except Exception as e:
-                logger.exception("Failed to refresh instruments: %s", e)
+                logger.exception(f"Error during instrument refresh at {now.isoformat()} UTC: %s", e)
+                return False
+                
+        return False
 
     async def aggregate_and_upload_hourly(self, hour_datetime: datetime) -> bool:
         """Aggregate the last hour's minute-level files into hourly files and upload to S3."""
@@ -174,8 +200,50 @@ class EC2OptionsDataCollector(OptionsDataCollector):
             logger.exception(f"Error during hourly aggregation: {e}")
             return False
 
+    async def cleanup_old_data(self, max_age_days: int = 3) -> None:
+        """Remove local data older than specified days."""
+        try:
+            base_path = Path(self.config['temp_data_path'])
+            now = datetime.now(timezone.utc)
+            cutoff_date = now - timedelta(days=max_age_days)
+            
+            logger.info(f"Cleaning up data older than {max_age_days} days ({cutoff_date.date()})")
+            
+            # Check both regular and hourly data directories
+            data_dirs = [base_path, base_path / 'hourly']
+            
+            for data_dir in data_dirs:
+                if not data_dir.exists():
+                    continue
+                    
+                # Walk through coin directories
+                for coin_dir in data_dir.glob('coin=*'):
+                    # Check date directories
+                    for date_dir in coin_dir.glob('date=*'):
+                        try:
+                            # Extract date from directory name
+                            date_str = date_dir.name.replace('date=', '')
+                            dir_date = datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                            
+                            # Remove if older than cutoff
+                            if dir_date.date() < cutoff_date.date():
+                                logger.info(f"Removing old data: {date_dir}")
+                                shutil.rmtree(date_dir)
+                                
+                        except (ValueError, OSError) as e:
+                            logger.error(f"Error processing directory {date_dir}: {e}")
+                    
+                    # Clean up empty coin directories
+                    if not any(coin_dir.iterdir()):
+                        coin_dir.rmdir()
+                        
+            logger.info("Data cleanup completed")
+            
+        except Exception as e:
+            logger.exception(f"Error during data cleanup: {e}")
+
     async def run(self):
-        """Override run to include hourly aggregation."""
+        """Override run to include data cleanup."""
         self.running = True
         
         if not await self.initialize():
@@ -187,6 +255,10 @@ class EC2OptionsDataCollector(OptionsDataCollector):
             try:
                 now = datetime.now(timezone.utc)
                 next_minute = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+                
+                # Daily cleanup at a specific hour (e.g., 07:00 UTC, before instrument refresh)
+                if now.hour == 7 and now.minute == 0 and now.second < 30:
+                    await self.cleanup_old_data()
                 
                 # Check if we're at the start of an hour
                 if now.minute == 0 and now.second < 30:
