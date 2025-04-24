@@ -162,7 +162,7 @@ class OptionsDataCollector:
 
         # Cleanup
         if self.manager:
-            self.manager.stop()
+            await self.manager.stop()
         logger.info("Collector stopped")
 
 if __name__ == "__main__":

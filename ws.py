@@ -308,7 +308,7 @@ class WsManager:
             self._cache[channel] = data
         pass
 
-    def start(self) -> None:
+    async def start(self) -> None:
         """Split channels into batches & spin up client threads."""
         for i in range(0, len(self.all_channels), self.batch_size):
             batch = self.all_channels[i:i+self.batch_size]
@@ -322,6 +322,8 @@ class WsManager:
             self.clients.append(client)
             client.start()
         logger.info(f"Started {len(self.clients)} WebSocket threads")
+        # Give time for clients to establish connections
+        await asyncio.sleep(1)
 
     def get_latest(self) -> Dict[str, dict]:
         """Snapshot of the latest ticks across all channels."""
@@ -342,7 +344,9 @@ class WsManager:
             logger.info(f"Popped snapshot with {len(snapshot)} entries, cache cleared.")
         return snapshot
 
-    def stop(self) -> None:
-        """Signal all clients to shut down."""
+    async def stop(self) -> None:
+        """Signal all clients to shut down and wait for them to stop."""
         for c in self.clients:
             c.stop()
+        # Give clients time to clean up
+        await asyncio.sleep(1)

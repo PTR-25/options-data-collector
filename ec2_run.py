@@ -57,7 +57,6 @@ class EC2OptionsDataCollector(OptionsDataCollector):
             now.second < 50
         )
         
-        
         # Log conditions before the check
         logger.info(f"Conditions: is_refresh_window={is_refresh_window} (now.time={now.time()})")
         
@@ -67,7 +66,7 @@ class EC2OptionsDataCollector(OptionsDataCollector):
                 # Stop current manager
                 if self.manager:
                     logger.info("Stopping existing WsManager...")
-                    await self.manager.stop()  # ADD await
+                    await self.manager.stop()
                     logger.info("Existing WsManager stopped.")
                 
                 # Fetch fresh instruments and reinitialize
@@ -290,10 +289,14 @@ class EC2OptionsDataCollector(OptionsDataCollector):
                 # --- End Refresh Check ---
             except asyncio.CancelledError:
                 break
+            except Exception as e:
+                logger.exception("Error in main loop: %s", e)
+                # On error, wait a few seconds then align with next minute
+                await asyncio.sleep(5)
 
         # Cleanup
         if self.manager:
-            self.manager.stop()
+            await self.manager.stop()  # Change to await the stop call
         logger.info("Collector stopped")
 
 def setup_ec2_environment():
