@@ -86,7 +86,7 @@ class OptionsDataCollector:
                 max_channels_per_conn=self.config['max_channels_per_conn'],
                 heartbeat_interval=self.config['heartbeat_interval']
             )
-            self.manager.start()
+            await self.manager.start()
             logger.info("WebSocket manager started successfully")
             return True
             

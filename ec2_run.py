@@ -34,7 +34,6 @@ logger.info(f".env file location: {os.path.abspath('.env')}")
 class EC2OptionsDataCollector(OptionsDataCollector):
     def __init__(self):  # Remove config_path parameter
         super().__init__()  # Remove config_path parameter
-        self.last_refresh_date = None
         self.last_aggregation_hour = None
 
     async def check_instrument_refresh(self):
@@ -50,29 +49,31 @@ class EC2OptionsDataCollector(OptionsDataCollector):
             microsecond=0
         )
         
-        # Check if we're in the first 30 seconds of the target hour and haven't refreshed today
+        # Add more detailed logging
+        logger.info(f"Checking instrument refresh at {now.isoformat()} UTC. Target hour: {refresh_hour}.")
         is_refresh_window = (
             now.hour == refresh_hour and 
             now.minute == 0 and 
-            now.second < 30
+            now.second < 50
         )
         
-        needs_refresh = (
-            self.last_refresh_date is None or 
-            now.date() > self.last_refresh_date
-        )
         
-        if is_refresh_window and needs_refresh:
+        # Log conditions before the check
+        logger.info(f"Conditions: is_refresh_window={is_refresh_window} (now.time={now.time()})")
+        
+        if is_refresh_window:
             logger.info(f"Starting daily instrument refresh at {now.isoformat()} UTC")
             try:
                 # Stop current manager
                 if self.manager:
-                    self.manager.stop()
+                    logger.info("Stopping existing WsManager...")
+                    await self.manager.stop()  # ADD await
+                    logger.info("Existing WsManager stopped.")
                 
                 # Fetch fresh instruments and reinitialize
+                logger.info("Calling initialize to fetch new instruments and restart manager...")
                 refresh_success = await self.initialize()
                 if refresh_success:
-                    self.last_refresh_date = now.date()
                     logger.info(f"Daily instrument refresh completed successfully at {datetime.now(timezone.utc).isoformat()} UTC")
                     return True
                 else:
@@ -253,40 +254,42 @@ class EC2OptionsDataCollector(OptionsDataCollector):
         logger.info("Starting main collection loop")
         while self.running:
             try:
+                # --- Wait for next minute ---
                 now = datetime.now(timezone.utc)
                 next_minute = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
-                
-                # Daily cleanup at a specific hour (e.g., 07:00 UTC, before instrument refresh)
-                if now.hour == 7 and now.minute == 0 and now.second < 30:
-                    await self.cleanup_old_data()
-                
-                # Check if we're at the start of an hour
-                if now.minute == 0 and now.second < 30:
-                    # Always aggregate the previous hour at XX:00
-                    prev_hour = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
-                    logger.info(f"Starting hourly aggregation at {now} for hour {prev_hour}")
-                    await self.aggregate_and_upload_hourly(prev_hour)
-                
-                # Wait for next minute
                 wait_time = (next_minute - now).total_seconds()
                 logger.debug(f"Waiting {wait_time:.3f} seconds until {next_minute.strftime('%H:%M:%S')}")
                 await asyncio.sleep(wait_time)
+                # --- End Wait ---
                 
-                # Take snapshot
+                # --- Take snapshot ---
+                # This now happens accurately at the start of the minute (e.g., XX:01:00)
                 start_time = datetime.now(timezone.utc)
                 success = await self.process_snapshot()
                 
                 if success:
                     process_time = (datetime.now(timezone.utc) - start_time).total_seconds()
                     logger.debug(f"Snapshot processing took {process_time:.3f} seconds")
+                # --- End Snapshot ---
                 
+                now = datetime.now(timezone.utc)
+                # Daily cleanup at a specific hour (e.g., 07:00 UTC, before instrument refresh)
+                if now.hour == 7 and now.minute == 0 and now.second < 50:
+                    await self.cleanup_old_data()
+                
+                # Check if we're at the start of an hour for aggregation
+                if now.minute == 0 and now.second < 30:
+                    # Always aggregate the previous hour at XX:00
+                    prev_hour = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+                    logger.info(f"Starting hourly aggregation at {now} for hour {prev_hour}")
+                    await self.aggregate_and_upload_hourly(prev_hour)
+                                
+                # --- Check for refresh ---
+                # This ensures we check right at the top of the hour (e.g., 08:00:00)
                 await self.check_instrument_refresh()
-                
+                # --- End Refresh Check ---
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                logger.exception("Error in main loop: %s", e)
-                await asyncio.sleep(5)
 
         # Cleanup
         if self.manager:
