@@ -16,7 +16,6 @@ import shutil
 from pathlib import Path
 
 from main import OptionsDataCollector
-from instrument_fetcher import fetch_option_instruments
 
 # Configure logging after env vars are loaded
 logging.basicConfig(
@@ -41,20 +40,12 @@ class EC2OptionsDataCollector(OptionsDataCollector):
         now = datetime.now(timezone.utc)
         refresh_hour = int(os.getenv('DAILY_REFRESH_HOUR', 8))
         
-        # Create target time in UTC
-        target_time = now.replace(
-            hour=refresh_hour,
-            minute=0,
-            second=0,
-            microsecond=0
-        )
-        
         # Add more detailed logging
         logger.info(f"Checking instrument refresh at {now.isoformat()} UTC. Target hour: {refresh_hour}.")
         is_refresh_window = (
             now.hour == refresh_hour and 
             now.minute == 0 and 
-            now.second < 50
+            now.second < 60
         )
         
         # Log conditions before the check
@@ -284,8 +275,18 @@ class EC2OptionsDataCollector(OptionsDataCollector):
                     await self.aggregate_and_upload_hourly(prev_hour)
                                 
                 # --- Check for refresh ---
-                # This ensures we check right at the top of the hour (e.g., 08:00:00)
-                await self.check_instrument_refresh()
+                # Special handling for 8 AM UTC - wait until seconds = 50 before refresh
+                now = datetime.now(timezone.utc)  # Get fresh timestamp
+                if now.hour == 8 and now.minute == 0:
+                    if now.second < 50:
+                        wait_seconds = 50 - now.second
+                        logger.info(f"It's 8 AM UTC, waiting {wait_seconds} seconds before instrument refresh...")
+                        await asyncio.sleep(wait_seconds)
+                    logger.info("Now checking for instrument refresh at 8 AM with seconds=50")
+                    await self.check_instrument_refresh()
+                else:
+                    # Normal refresh check for other hours
+                    await self.check_instrument_refresh()
                 # --- End Refresh Check ---
             except asyncio.CancelledError:
                 break

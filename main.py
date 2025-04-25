@@ -43,7 +43,7 @@ class OptionsDataCollector:
             
             config = {
                 'snapshot_interval': int(snapshot_interval),
-                'temp_data_path': os.getenv('LOCAL_DATA_PATH', './temp_data'),
+                'temp_data_path': os.getenv('EC2_TEMP_PATH', './temp_data'),
                 's3_bucket': os.getenv('S3_BUCKET'),
                 's3_prefix': os.getenv('S3_PREFIX', 'options-data'),
                 'max_channels_per_conn': int(os.getenv('MAX_CHANNELS_PER_CONN', '500')),
