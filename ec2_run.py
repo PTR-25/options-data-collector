@@ -369,10 +369,13 @@ class EC2OptionsDataCollector(OptionsDataCollector):
         logger.info("Collector stopped")
 
 def setup_ec2_environment():
-    """Ensure EC2 environment is properly set up."""
-    # Create necessary directories
-    os.makedirs(os.getenv('EC2_LOG_PATH', '/var/log/options-collector'), exist_ok=True)
-    os.makedirs(os.getenv('EC2_TEMP_PATH', '/tmp/options-collector'), exist_ok=True)
+    log_path = os.getenv('EC2_LOG_PATH', '/var/log/options-collector/collector.log')
+    log_dir  = os.path.dirname(log_path)
+    os.makedirs(log_dir, exist_ok=True)
+
+    temp_path = os.getenv('EC2_TEMP_PATH', '/tmp/options-collector')
+    os.makedirs(temp_path, exist_ok=True)
+
 
 if __name__ == "__main__":
     setup_ec2_environment()
