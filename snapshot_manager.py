@@ -1,7 +1,7 @@
 import logging
 import os
 import re
-from datetime import datetime, UTC
+from datetime import datetime
 from typing import Dict, Optional, Tuple
 
 import pandas as pd

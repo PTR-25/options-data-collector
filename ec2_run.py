@@ -3,9 +3,14 @@ from dotenv import load_dotenv
 # Load environment variables first, before any other imports or configuration
 load_dotenv()
 
+import os
+
+# === Ensure the log directory exists before configuring logging ===
+log_path = os.getenv('EC2_LOG_PATH', '/var/log/options-collector/collector.log')
+os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
 import asyncio
 import logging
-import os
 import time
 from datetime import datetime, timezone, timedelta
 import yaml
@@ -18,11 +23,11 @@ from pathlib import Path
 
 from main import OptionsDataCollector
 
-# Configure logging after env vars are loaded
+# Configure logging after env vars are loaded and log directory is in place
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    filename=os.getenv('EC2_LOG_PATH', '/var/log/options-collector/collector.log')  # Log to file on EC2
+    filename=log_path
 )
 logger = logging.getLogger(__name__)
 
@@ -369,12 +374,15 @@ class EC2OptionsDataCollector(OptionsDataCollector):
         logger.info("Collector stopped")
 
 def setup_ec2_environment():
+    # Ensure the log *directory* exists, not the file itself
     log_path = os.getenv('EC2_LOG_PATH', '/var/log/options-collector/collector.log')
     log_dir  = os.path.dirname(log_path)
     os.makedirs(log_dir, exist_ok=True)
 
+    # Temp path as before
     temp_path = os.getenv('EC2_TEMP_PATH', '/tmp/options-collector')
     os.makedirs(temp_path, exist_ok=True)
+
 
 
 if __name__ == "__main__":
