@@ -42,17 +42,21 @@ class DeribitWebsocketClient:
         on_hb: Optional[Callable[[dict], None]] = None,
         heartbeat_interval: int = 30,
         reconnect_interval: float = 2.5,
+        max_reconnect_attempts: int = 10,
     ):
         self.channels = channels
         self.on_tick = on_tick
         self.on_hb = on_hb
         self.heartbeat_interval = max(10, heartbeat_interval)
         self.reconnect_interval = reconnect_interval
+        self.max_reconnect_attempts = max_reconnect_attempts
         self.ws_url = WS_URL
         self._id = 1
         self._pending_pings = set()
         self._stop = False
-        # each client gets its own loop & thread
+        self._reconnect_attempts = 0
+        self._last_successful_connection = time.time()
+        self._connection_healthy = True
         self.loop = asyncio.new_event_loop()
 
     def _next_id(self) -> int:
@@ -80,11 +84,17 @@ class DeribitWebsocketClient:
                 logger.info(f"Attempting to connect to {self.ws_url}")
                 ws = await sess.ws_connect(self.ws_url)
                 logger.info(f"Connection established to {self.ws_url}")
+                
+                # Reset reconnection attempts on successful connection
+                self._reconnect_attempts = 0
+                self._last_successful_connection = time.time()
+                self._connection_healthy = True
+
                 # request server heartbeat
                 hb_req_id = self._next_id()
                 await ws.send_json({
                     "jsonrpc": "2.0",
-                    "id": hb_req_id,  # Use the stored ID here
+                    "id": hb_req_id,
                     "method": "public/set_heartbeat",
                     "params": {"interval": self.heartbeat_interval}
                 })
@@ -110,8 +120,6 @@ class DeribitWebsocketClient:
                     if msg.type == WSMsgType.TEXT:
                         try:
                             d = msg.json()
-                            # Log *every* text message received in the main loop
-                            # logger.debug(f"Received message: {d}")
 
                             # server heartbeat
                             if d.get("method") == "heartbeat":
@@ -145,14 +153,7 @@ class DeribitWebsocketClient:
 
                             # pong reply
                             elif "id" in d and d.get("result") == "pong":
-                                logger.debug(f"Pong received for id {d['id']}")
                                 self._pending_pings.discard(d["id"])
-
-                            # Handle responses to subscribe, set_heartbeat etc. if needed
-                            elif "id" in d and "result" in d:
-                                if d.get("id") == sub_id:
-                                    logger.info(f"Received subscription confirmation (id: {sub_id}): {d['result']}")
-                                # Add checks for other request IDs if necessary
 
                         except json.JSONDecodeError:
                             logger.warning(f"Received non-JSON message: {msg.data}")
@@ -175,6 +176,21 @@ class DeribitWebsocketClient:
                     ping_task.cancel()
                 await ws.close()
                 logger.info("WebSocket connection closed.")
+
+                # Check if we should attempt reconnection
+                if not self._stop:
+                    self._reconnect_attempts += 1
+                    if self._reconnect_attempts > self.max_reconnect_attempts:
+                        logger.error("Max reconnection attempts reached. Entering maintenance mode.")
+                        self._connection_healthy = False
+                        # Wait longer before next attempt
+                        await asyncio.sleep(300)  # 5 minutes
+                        self._reconnect_attempts = 0
+                    else:
+                        # Exponential backoff
+                        wait_time = min(300, self.reconnect_interval * (2 ** (self._reconnect_attempts - 1)))
+                        logger.info(f"Attempting reconnection in {wait_time} seconds (attempt {self._reconnect_attempts})")
+                        await asyncio.sleep(wait_time)
 
             except ClientError as e:
                 logger.error(f"Connection error: {e}. Reconnecting in {self.reconnect_interval}s...")
@@ -264,6 +280,10 @@ class DeribitWebsocketClient:
             await self._auth_request(sess, grant_type='refresh_token')
             logger.info("Auth token refreshed in loop")
             self._schedule_refresh()
+
+    def is_healthy(self) -> bool:
+        """Check if the connection is healthy."""
+        return self._connection_healthy and (time.time() - self._last_successful_connection) < 300  # 5 minutes
 
 
 class WsManager:

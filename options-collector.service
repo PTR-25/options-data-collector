@@ -1,0 +1,17 @@
+[Unit]
+Description=Options Data Collector Watchdog
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/options-data-collector
+Environment=PYTHONUNBUFFERED=1
+Environment=EC2_LOG_PATH=/var/log/options-collector
+Environment=EC2_TEMP_PATH=/tmp/options-collector
+ExecStart=/usr/bin/python3 /home/ec2-user/options-data-collector/watchdog.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target 

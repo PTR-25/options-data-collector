@@ -31,9 +31,66 @@ logger.info(f"Current working directory: {os.getcwd()}")
 logger.info(f".env file location: {os.path.abspath('.env')}")
 
 class EC2OptionsDataCollector(OptionsDataCollector):
-    def __init__(self):  # Remove config_path parameter
-        super().__init__()  # Remove config_path parameter
+    def __init__(self):
+        super().__init__()
         self.last_aggregation_hour = None
+        self._last_health_check = time.time()
+        self._health_check_interval = 60  # Check health every minute
+        self._consecutive_failures = 0
+        self._max_consecutive_failures = 5
+
+    async def check_health(self) -> bool:
+        """Check the health of the system and attempt recovery if needed."""
+        try:
+            now = time.time()
+            if now - self._last_health_check < self._health_check_interval:
+                return True
+
+            self._last_health_check = now
+            
+            # Check WebSocket manager health
+            if not self.manager or not all(client.is_healthy() for client in self.manager.clients):
+                logger.warning("WebSocket connections unhealthy, attempting recovery...")
+                self._consecutive_failures += 1
+                
+                if self._consecutive_failures >= self._max_consecutive_failures:
+                    logger.error("Too many consecutive failures, performing full restart...")
+                    await self.perform_full_restart()
+                    return False
+                
+                # Attempt to recover WebSocket connections
+                if self.manager:
+                    await self.manager.stop()
+                await self.initialize()
+                return False
+            
+            # Reset failure counter on successful health check
+            self._consecutive_failures = 0
+            return True
+            
+        except Exception as e:
+            logger.exception(f"Error during health check: {e}")
+            return False
+
+    async def perform_full_restart(self):
+        """Perform a full restart of the system."""
+        try:
+            logger.info("Performing full system restart...")
+            
+            # Stop current manager
+            if self.manager:
+                await self.manager.stop()
+            
+            # Clear any pending data
+            self._consecutive_failures = 0
+            
+            # Reinitialize
+            await self.initialize()
+            
+            logger.info("Full restart completed")
+            
+        except Exception as e:
+            logger.exception(f"Error during full restart: {e}")
 
     async def check_instrument_refresh(self):
         """Check if we need to refresh instruments at exactly 08:00 UTC."""
@@ -234,7 +291,7 @@ class EC2OptionsDataCollector(OptionsDataCollector):
             logger.exception(f"Error during data cleanup: {e}")
 
     async def run(self):
-        """Override run to include data cleanup."""
+        """Override run to include health checks and automatic recovery."""
         self.running = True
         
         if not await self.initialize():
@@ -244,6 +301,12 @@ class EC2OptionsDataCollector(OptionsDataCollector):
         logger.info("Starting main collection loop")
         while self.running:
             try:
+                # Check system health
+                if not await self.check_health():
+                    logger.warning("Health check failed, waiting before retry...")
+                    await asyncio.sleep(30)
+                    continue
+
                 # --- Wait for next minute ---
                 now = datetime.now(timezone.utc)
                 next_minute = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
@@ -260,6 +323,9 @@ class EC2OptionsDataCollector(OptionsDataCollector):
                 if success:
                     process_time = (datetime.now(timezone.utc) - start_time).total_seconds()
                     logger.debug(f"Snapshot processing took {process_time:.3f} seconds")
+                else:
+                    logger.warning("Failed to process snapshot")
+                    self._consecutive_failures += 1
                 # --- End Snapshot ---
                 
                 now = datetime.now(timezone.utc)
@@ -292,12 +358,13 @@ class EC2OptionsDataCollector(OptionsDataCollector):
                 break
             except Exception as e:
                 logger.exception("Error in main loop: %s", e)
+                self._consecutive_failures += 1
                 # On error, wait a few seconds then align with next minute
                 await asyncio.sleep(5)
 
         # Cleanup
         if self.manager:
-            await self.manager.stop()  # Change to await the stop call
+            await self.manager.stop()
         logger.info("Collector stopped")
 
 def setup_ec2_environment():
