@@ -7,11 +7,14 @@ Type=simple
 User=ec2-user
 WorkingDirectory=/home/ec2-user/options-data-collector
 Environment=PYTHONUNBUFFERED=1
-Environment=EC2_LOG_PATH=/var/log/options-collector
+# Point EC2_RUN and Watchdog both at their own collector log
+Environment=EC2_LOG_PATH=/var/log/options-collector/collector.log
 Environment=EC2_TEMP_PATH=/tmp/options-collector
-ExecStart=/usr/bin/python3 /home/ec2-user/options-data-collector/watchdog.py
+# Use the virtualenv interpreter
+ExecStart=/home/ec2-user/options-data-collector/env/bin/python \
+          /home/ec2-user/options-data-collector/watchdog.py
 Restart=always
 RestartSec=10
 
 [Install]
-WantedBy=multi-user.target 
+WantedBy=multi-user.target
