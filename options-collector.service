@@ -11,7 +11,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=EC2_LOG_PATH=/var/log/options-collector/collector.log
 Environment=EC2_TEMP_PATH=/tmp/options-collector
 # Use the virtualenv interpreter
-ExecStart=/home/ec2-user/options-data-collector/env/bin/python \
+ExecStart=/home/ec2-user/options-data-collector/env/bin/python3 \
           /home/ec2-user/options-data-collector/watchdog.py
 Restart=always
 RestartSec=10

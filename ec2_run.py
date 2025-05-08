@@ -31,7 +31,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 # Add diagnostic prints
+logger.info(f"LOG HANDLERS: {logger.handlers}")
+logger.info(f"Using log_path={log_path}")
 logger.info(f"S3_BUCKET from environment: {os.getenv('S3_BUCKET')}")
 logger.info(f"Current working directory: {os.getcwd()}")
 logger.info(f".env file location: {os.path.abspath('.env')}")
