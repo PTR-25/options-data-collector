@@ -6,7 +6,8 @@ load_dotenv()
 import asyncio
 import logging
 import os
-from datetime import datetime, time, timezone, timedelta
+import time
+from datetime import datetime, timezone, timedelta
 import yaml
 import pandas as pd
 import pyarrow as pa

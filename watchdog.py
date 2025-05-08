@@ -10,10 +10,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Configure logging
+log_path = Path(os.getenv('EC2_LOG_PATH', '/var/log/options-collector/watchdog.log'))
+if log_path.is_dir():
+    log_path = log_path / 'watchdog.log'
+    
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    filename=os.getenv('EC2_LOG_PATH', '/var/log/options-collector/watchdog.log')
+    filename=str(log_path)
 )
 logger = logging.getLogger(__name__)
 
