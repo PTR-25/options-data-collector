@@ -6,6 +6,7 @@ import boto3
 from botocore.exceptions import ClientError
 import asyncio
 from dotenv import load_dotenv
+import time
 
 # Load environment variables first
 load_dotenv()
@@ -122,7 +123,7 @@ class S3Uploader:
                     return False
                 logger.warning(f"Retry {attempt + 1}/{self.max_retries} for {local_file}: {e}")
                 # Add exponential backoff
-                asyncio.sleep(2 ** attempt)
+                time.sleep(2 ** attempt)
         return False
 
     def _upload_file(self, local_file: str, bucket: str, s3_key_prefix: str) -> bool:
