@@ -36,45 +36,65 @@ class EC2OptionsDataCollector(OptionsDataCollector):
         self.last_aggregation_hour = None
 
     async def check_instrument_refresh(self):
-        """Check if we need to refresh instruments at exactly 08:00 UTC."""
+        """
+        Check if we need to refresh instruments at the configured daily hour (e.g., 08:00 UTC).
+        This method will attempt to refresh instruments indefinitely until successful if it's
+        the designated refresh window.
+        """
         now = datetime.now(timezone.utc)
         refresh_hour = int(os.getenv('DAILY_REFRESH_HOUR', 8))
-        
-        # Add more detailed logging
-        logger.info(f"Checking instrument refresh at {now.isoformat()} UTC. Target hour: {refresh_hour}.")
-        is_refresh_window = (
-            now.hour == refresh_hour and 
-            now.minute == 0 and 
-            now.second < 60
-        )
-        
-        # Log conditions before the check
-        logger.info(f"Conditions: is_refresh_window={is_refresh_window} (now.time={now.time()})")
-        
-        if is_refresh_window:
-            logger.info(f"Starting daily instrument refresh at {now.isoformat()} UTC")
-            try:
-                # Stop current manager
-                if self.manager:
-                    logger.info("Stopping existing WsManager...")
-                    await self.manager.stop()
-                    logger.info("Existing WsManager stopped.")
+
+        logger.info(f"Checking for instrument refresh at {now.isoformat()} UTC. Target refresh hour: {refresh_hour} UTC.")
+
+        # Determine if it's the refresh window (top of the configured hour)
+        is_refresh_trigger_time = (now.hour == refresh_hour and now.minute == 0)
+
+        if is_refresh_trigger_time:
+            logger.info(f"Daily instrument refresh window detected at {now.isoformat()} UTC. Starting refresh process (will retry until successful).")
+            
+            retry_delay_seconds = int(os.getenv('INSTRUMENT_REFRESH_RETRY_DELAY_SECONDS', 60))
+            attempt = 0
+
+            while True:  # Loop indefinitely until success
+                attempt += 1
+                logger.info(f"Instrument Refresh: Attempt {attempt}...")
                 
-                # Fetch fresh instruments and reinitialize
-                logger.info("Calling initialize to fetch new instruments and restart manager...")
-                refresh_success = await self.initialize()
-                if refresh_success:
-                    logger.info(f"Daily instrument refresh completed successfully at {datetime.now(timezone.utc).isoformat()} UTC")
-                    return True
-                else:
-                    logger.error("Failed to refresh instruments")
-                    return False
+                current_utc_time_for_log = datetime.now(timezone.utc).isoformat()
+                try:
+                    # Stop current manager if it exists
+                    if self.manager:
+                        logger.info(f"Instrument Refresh (Attempt {attempt}): Stopping existing WsManager...")
+                        await self.manager.stop()
+                        logger.info(f"Instrument Refresh (Attempt {attempt}): Existing WsManager stopped successfully.")
+                    else:
+                        logger.info(f"Instrument Refresh (Attempt {attempt}): No existing WsManager to stop.")
                     
-            except Exception as e:
-                logger.exception(f"Error during instrument refresh at {now.isoformat()} UTC: %s", e)
-                return False
-                
-        return False
+                    # Fetch fresh instruments and reinitialize the WsManager
+                    logger.info(f"Instrument Refresh (Attempt {attempt}): Calling initialize() to fetch new instruments and restart WsManager...")
+                    refresh_success = await self.initialize()  # This is in parent class OptionsDataCollector
+                    
+                    if refresh_success:
+                        logger.info(f"Instrument Refresh: Attempt {attempt} SUCCEEDED at {datetime.now(timezone.utc).isoformat()} UTC. Instruments are now up-to-date.")
+                        return True  # Successfully refreshed
+                    else:
+                        # self.initialize() logs its own detailed errors.
+                        logger.error(f"Instrument Refresh: Attempt {attempt} FAILED (initialize() returned False) at {current_utc_time_for_log}. Retrying in {retry_delay_seconds} seconds...")
+                        
+                except Exception as e:
+                    # This catches exceptions from self.manager.stop() or self.initialize()
+                    logger.exception(f"Instrument Refresh: Exception during attempt {attempt} at {current_utc_time_for_log}: {e}. Retrying in {retry_delay_seconds} seconds...")
+
+                await asyncio.sleep(retry_delay_seconds)
+                # Loop continues for the next attempt
+        else:
+            # Log if it's not the refresh time, but only if it's close to the top of an hour to avoid spamming logs
+            if now.minute == 0 and now.second < 10: # Log once at the start of other hours
+                 logger.info(f"Not the designated instrument refresh hour ({refresh_hour} UTC). Current time: {now.isoformat()} UTC. No refresh attempted.")
+            elif now.hour == refresh_hour and now.minute != 0 : # Log if it's the refresh hour but not minute 0
+                 logger.info(f"Inside refresh hour ({refresh_hour} UTC) but not minute 0. Current time: {now.isoformat()} UTC. No refresh attempted.")
+
+
+        return False # Not the refresh window, or refresh process somehow exited (should not happen with indefinite retry)
 
     async def aggregate_and_upload_hourly(self, hour_datetime: datetime) -> bool:
         """Aggregate the last hour's minute-level files into hourly files and upload to S3."""
@@ -130,6 +150,16 @@ class EC2OptionsDataCollector(OptionsDataCollector):
                         
                         # Combine snapshots for this expiry
                         hourly_df = pd.concat(dfs, ignore_index=True)
+                        
+                        # --- Ensure chronological order ---
+                        # Sort by 'snapshot_timestamp' to ensure data is in correct time order
+                        # This is crucial as glob.glob doesn't guarantee file order
+                        if 'snapshot_timestamp' in hourly_df.columns:
+                            hourly_df = hourly_df.sort_values(by='snapshot_timestamp').reset_index(drop=True)
+                            logger.debug(f"Hourly DataFrame for {coin} expiry {expiry} sorted by snapshot_timestamp.")
+                        else:
+                            logger.warning(f"'snapshot_timestamp' column not found in hourly DataFrame for {coin} expiry {expiry}. Cannot sort.")
+                        # --- End chronological order ---
                         
                         # Write hourly file preserving full structure
                         hourly_base = os.path.join(base_path, 'hourly')
@@ -268,7 +298,7 @@ class EC2OptionsDataCollector(OptionsDataCollector):
                     await self.cleanup_old_data()
                 
                 # Check if we're at the start of an hour for aggregation
-                if now.minute == 0 and now.second < 30:
+                if now.minute == 56 and now.second < 30:
                     # Always aggregate the previous hour at XX:00
                     prev_hour = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
                     logger.info(f"Starting hourly aggregation at {now} for hour {prev_hour}")
