@@ -16,6 +16,7 @@ import shutil
 from pathlib import Path
 
 from main import OptionsDataCollector
+from instrument_fetcher import fetch_option_instruments
 
 # Configure logging after env vars are loaded
 logging.basicConfig(
@@ -61,7 +62,7 @@ class EC2OptionsDataCollector(OptionsDataCollector):
                 
                 current_utc_time_for_log = datetime.now(timezone.utc).isoformat()
                 try:
-                    # Stop current manager if it exists
+                    # 1) stop existing websockets cleanly
                     if self.manager:
                         logger.info(f"Instrument Refresh (Attempt {attempt}): Stopping existing WsManager...")
                         await self.manager.stop()
@@ -69,17 +70,16 @@ class EC2OptionsDataCollector(OptionsDataCollector):
                     else:
                         logger.info(f"Instrument Refresh (Attempt {attempt}): No existing WsManager to stop.")
                     
-                    # Fetch fresh instruments and reinitialize the WsManager
-                    logger.info(f"Instrument Refresh (Attempt {attempt}): Calling initialize() to fetch new instruments and restart WsManager...")
-                    refresh_success = await self.initialize()  # This is in parent class OptionsDataCollector
-                    
-                    if refresh_success:
-                        logger.info(f"Instrument Refresh: Attempt {attempt} SUCCEEDED at {datetime.now(timezone.utc).isoformat()} UTC. Instruments are now up-to-date.")
-                        return True  # Successfully refreshed
-                    else:
-                        # self.initialize() logs its own detailed errors.
-                        logger.error(f"Instrument Refresh: Attempt {attempt} FAILED (initialize() returned False) at {current_utc_time_for_log}. Retrying in {retry_delay_seconds} seconds...")
-                        
+                    # 2) fetch new channels list
+                    logger.info(f"Instrument Refresh (Attempt {attempt}): Fetching new instruments list…")
+                    new_channels = await fetch_option_instruments()
+
+                    # 3) diff + in-place subscribe/unsubscribe
+                    logger.info(f"Instrument Refresh (Attempt {attempt}): Resubscribing channels…")
+                    await self.manager.resubscribe(new_channels)
+                
+                    logger.info(f"Instrument Refresh: Attempt {attempt} SUCCEEDED at {datetime.now(timezone.utc).isoformat()} UTC. Instruments are now up-to-date.")
+                    return True
                 except Exception as e:
                     # This catches exceptions from self.manager.stop() or self.initialize()
                     logger.exception(f"Instrument Refresh: Exception during attempt {attempt} at {current_utc_time_for_log}: {e}. Retrying in {retry_delay_seconds} seconds...")
