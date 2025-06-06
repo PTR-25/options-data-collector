@@ -298,8 +298,8 @@ class EC2OptionsDataCollector(OptionsDataCollector):
                     await self.cleanup_old_data()
                 
                 # Check if we're at the start of an hour for aggregation
-                if now.minute == 56 and now.second < 30:
-                    # Always aggregate the previous hour at XX:00
+                if now.minute == 00 and now.second > 30:
+                    # Always aggregate the previous hour at HH+1:00:30
                     prev_hour = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
                     logger.info(f"Starting hourly aggregation at {now} for hour {prev_hour}")
                     await self.aggregate_and_upload_hourly(prev_hour)

@@ -47,7 +47,7 @@ async def fetch_option_instruments() -> List[str]:
 
     try:
         # Increase max_size to 10MB to handle large responses
-        async with websockets.connect(uri, ping_timeout=60, max_size=10 * 1024 * 1024) as websocket:
+        async with websockets.connect(uri, ping_timeout=70, max_size=10 * 1024 * 1024) as websocket:
             logger.info(f"Connected to {uri} for instrument fetching.")
             
             # Fetch ALL instruments at once using currency="any"
@@ -67,7 +67,7 @@ async def fetch_option_instruments() -> List[str]:
             await websocket.send(json.dumps(request))
 
             try:
-                raw = await asyncio.wait_for(websocket.recv(), timeout=30.0)
+                raw = await asyncio.wait_for(websocket.recv(), timeout=70.0)
                 data = json.loads(raw)
 
                 if data.get("id") == request_id:
